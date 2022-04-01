@@ -47,6 +47,8 @@ df <- scrape_statcast(2021)
 
 write_csv(df,'/Users/jimauer/R/strikeouts/statcast.csv')
 
+df<-read_csv('/Users/jimauer/R/strikeouts/statcast.csv')
+
 #formatting data
 format_statcast<-function(data){
   
@@ -133,20 +135,112 @@ return(df1)
 
 plays <- format_statcast(df)
 
+remove(df)
+
+##### Building Run Expectancy table for 2021 ######
+
+#making a table of the max score to end each inning
+maxinningscore <- plays %>% group_by(gameid,inning,inning_topbot) %>% 
+  summarise(inning_max_score=max(post_bat_score))
+
+#creating a run expectancy table
+retable<-left_join(plays %>% filter(game_type=="Regular Season",inning<9,event_type!="NA",
+                 home_team!="COL"), 
+  maxinningscore,
+  by=c("gameid","inning","inning_topbot")) %>% 
+  group_by(outs_before,basecode_before) %>% 
+  summarise(re=mean(inning_max_score-bat_score_before)) %>% 
+  ungroup()
+
+retablegt<-retable %>% gt() %>%  
+  tab_header(
+    title="2021 Run Expectancy for Base-Out State",
+    subtitle="") %>% 
+  cols_label(outs_before="Outs Before",
+             basecode_before="Base State",
+             re="Run Expectancy") %>% 
+  fmt_number(
+    columns = c("re"),
+    decimals = 2,
+  ) %>% 
+  cols_align(
+    align="right",
+    columns= basecode_before
+  ) %>% 
+  tab_source_note(
+    source_note = "Data from www.baseballsavant.mlb.com"
+  ) %>% gtsave('retable.png','/Users/jimauer/R/strikeouts')
+
+#calculating the average starting run expectancy
+starting_re <- left_join(plays %>% filter(game_type=="Regular Season",inning<9,event_type!="NA",
+                           home_team!="COL") %>% 
+            select(event_type,outs_before,basecode_before), 
+         retable,
+          by=c("outs_before","basecode_before")) %>% 
+  group_by(event_type) %>% 
+  summarise(starting_re=mean(re)) %>% 
+  ungroup()
+
+
+
+#recreating the run expextancy table 1 from The Book
+RE_T1<-left_join(plays %>% filter(game_type=="Regular Season",inning<9,event_type!="NA",
+                           home_team!="COL"), 
+          maxinningscore,
+          by=c("gameid","inning","inning_topbot")) %>% 
+  group_by(event_type) %>% 
+  summarise(n=n(),runs=sum(inning_max_score-bat_score_before),ave_runs=runs/n) %>% 
+  arrange(desc(ave_runs)) %>% 
+  ungroup()
+
+
+#recreating the run expextancy table 2 from The Book
+RE_T2 <- left_join(RE_T1,
+          starting_re,
+          by=c("event_type"))
+
+
+#recreating the run expextancy table 3 from The Book
+RE_T2 %>% mutate(run_value=(ave_runs-starting_re)) %>% 
+  arrange(desc(run_value)) %>% 
+  gt() %>%  
+  tab_header(
+    title="2021 Run Values",
+    subtitle="") %>% 
+  cols_label(event_type="Event",
+             runs="Runs",
+             ave_runs="Average Runs",
+             starting_re="Starting RE",
+             run_value="Run Value") %>% 
+  fmt_number(
+    columns = c("ave_runs", "starting_re","run_value"),
+    decimals = 2,
+  ) %>% 
+  tab_source_note(
+    source_note = "Data from www.baseballsavant.mlb.com"
+  ) %>% 
+  gtsave('expected runs.png','/Users/jimauer/R/strikeouts')
+  
+
+
+
+ 
+#### Building play data set that omits plays after the second strikeout#####  
+
 #identifying all second out strikeouts
 secondout <- plays %>% filter(game_type=='Regular Season',event_type=='strikeout',outs_before==1) %>% 
   select(event_type, game_type, outs_before, inning, inning_topbot, 
-                 gameid, pitch_number, batterid) %>% 
+         gameid, pitch_number, batterid,pitcherid) %>% 
   arrange(desc(pitch_number)) %>% 
-  group_by(gameid,inning,inning_topbot,batterid) %>% 
+  group_by(gameid,inning,inning_topbot,batterid,pitcherid) %>% 
   summarise(fistpitch=min(pitch_number))
 
 #identifying all first out strikeouts
 firstout <- plays %>% filter(game_type=='Regular Season',event_type=='strikeout',outs_before==0) %>% 
   select(event_type, game_type, outs_before, inning, inning_topbot, 
-         gameid, pitch_number, batterid) %>% 
+         gameid, pitch_number, batterid,pitcherid) %>% 
   arrange(desc(pitch_number)) %>% 
-  group_by(gameid,inning,inning_topbot,batterid) %>% 
+  group_by(gameid,inning,inning_topbot,batterid,pitcherid) %>% 
   summarise(fistpitch=min(pitch_number))
 
 #identifying all instances of first and second outs as strikouts
@@ -155,17 +249,119 @@ firstsec <- semi_join(firstout,secondout, by=c("gameid","inning","inning_topbot"
 
 remove(firstout,secondout)
 
-#selecting columns and creating a column for runs to end of inning
-plays1<-left_join(plays %>% filter(game_type=="Regular Season",inning<9,event_type!="NA",
-                 home_team!="COL") %>% 
-  mutate() %>%
-  select(gameid,inning,inning_topbot,outs_before,basecode_before,event_type,bat_score_before),
-  
-  plays %>% select(gameid,inning,inning_topbot,pa_number,post_bat_score) %>% 
-    group_by(gameid,inning,inning_topbot) %>% 
-    summarise(end_inn_score=max(post_bat_score)),
-  by=c('gameid','inning','inning_topbot')) %>% 
-  mutate(runs=end_inn_score-bat_score_before)
+plays1 <- plays %>% mutate(ident=paste0(gameid,inning,inning_topbot,outs_before)) %>% 
+  filter(!ident %in% firstsec$ident)
+
+#making a table of the max score to end each inning
+maxinningscore1 <- plays1 %>% group_by(gameid,inning,inning_topbot) %>% 
+  summarise(inning_max_score=max(post_bat_score))
+
+#creating a run expectancy table
+retable1<-left_join(plays1 %>% filter(game_type=="Regular Season",inning<9,event_type!="NA",
+                                    home_team!="COL"), 
+                   maxinningscore1,
+                   by=c("gameid","inning","inning_topbot")) %>% 
+  group_by(outs_before,basecode_before) %>% 
+  summarise(re=mean(inning_max_score-bat_score_before)) %>% 
+  ungroup()
+
+#calculating the average starting run expectancy
+starting_re1 <- left_join(plays1 %>% filter(game_type=="Regular Season",inning<9,event_type!="NA",
+                                          home_team!="COL") %>% 
+                           select(event_type,outs_before,basecode_before), 
+                         retable1,
+                         by=c("outs_before","basecode_before")) %>% 
+  group_by(event_type) %>% 
+  summarise(starting_re=mean(re)) %>% 
+  ungroup()
+
+
+#recreating the run expextancy table 1 from The Book
+RE_T11<-left_join(plays1 %>% filter(game_type=="Regular Season",inning<9,event_type!="NA",
+                                  home_team!="COL"), 
+                 maxinningscore1,
+                 by=c("gameid","inning","inning_topbot")) %>% 
+  group_by(event_type) %>% 
+  summarise(n=n(),runs=sum(inning_max_score-bat_score_before),ave_runs=runs/n) %>% 
+  arrange(desc(ave_runs)) %>% 
+  ungroup()
+
+
+#recreating the run expextancy table 2 from The Book
+RE_T21 <- left_join(RE_T11,
+                   starting_re1,
+                   by=c("event_type"))
+
+
+#recreating the run expextancy table 3 from The Book
+RE_T21 %>% mutate(run_value=(ave_runs-starting_re)) %>% 
+  arrange(desc(run_value)) %>% 
+  gt() %>%  
+  tab_header(
+    title="2021 Run Values If 2 K's Ended an Inning",
+    subtitle="") %>% 
+  cols_label(event_type="Event",
+             runs="Runs",
+             ave_runs="Average Runs",
+             starting_re="Starting RE",
+             run_value="Run Value") %>% 
+  fmt_number(
+    columns = c("ave_runs", "starting_re","run_value"),
+    decimals = 2,
+  ) %>% 
+  tab_source_note(
+    source_note = "Data from www.baseballsavant.mlb.com"
+  )
+
+
+####Combining the two tables#####
+
+full_join(RE_T2 %>% mutate(run_value=(ave_runs-starting_re)) %>% 
+  arrange(desc(run_value)) %>% 
+    select(event_type,run_value),
+  RE_T21 %>% mutate(run_value_2K=(ave_runs-starting_re)) %>% 
+    select(event_type,run_value_2K),
+  by="event_type") %>% 
+  gt() %>%  
+  tab_header(
+    title="2021 Run Values",
+    subtitle="Standard vs If Inning Ended at 2K's") %>% 
+  cols_label(event_type="Event",
+             run_value="Run Value",
+             run_value_2K="Run Value End @ 2K") %>% 
+  fmt_number(
+    columns = c("run_value","run_value_2K"),
+    decimals = 2,
+  ) %>% 
+  tab_source_note(
+    source_note = "Data from www.baseballsavant.mlb.com"
+  )%>% 
+  gtsave('expected runs two ks.png','/Users/jimauer/R/strikeouts')
+
+#leaders in getting ks as first outs of inning
+left_join(firstsec %>% group_by(pitcherid) %>% summarise(n=n()) %>% 
+            arrange(desc(n)),
+          chadwick %>% select(key_mlbam,name_first,name_last),
+          by=c("pitcherid"="key_mlbam")) %>% 
+  head(n=10) %>% 
+  mutate(Name=paste(name_first,name_last)) %>% 
+  select(-pitcherid,-name_first,-name_last) %>% 
+  gt()%>%  
+  tab_header(
+    title="2021 Leaders in Getting Ks for 1st 2 Outs",
+    subtitle="") %>% 
+  cols_label(n="Two Ks to Start"
+  ) %>% 
+  tab_source_note(
+    source_note = "Data from www.baseballsavant.mlb.com"
+  ) %>% 
+  gtsave('Leaders in ks.png','/Users/jimauer/R/strikeouts')
+
+
+chadwick<-get_chadwick_lu()
+
+
+######Some Options for Combining Categories of Events#######
 
 #lumping some categories together
 plays1$event_type <- gsub(".*caught_stealing.*","caught_stealing",plays1$event_type)
@@ -177,24 +373,8 @@ plays1$event_type <- gsub(".*double_play.*","Out (on batted ball)",plays1$event_
 plays1$event_type <- gsub(".*other_out.*","Out (on batted ball)",plays1$event_type)
 
 
-#run value table for the 2021 season
-runvalue<-plays1 %>% mutate() %>% group_by(event_type) %>% 
-  summarise(n=n(),tot_runs=sum(runs),mean_runs=mean(runs)) %>% 
-  arrange(desc(mean_runs))
-
-#run value toble omitting anything happening after a second strikout in an inning
-runvaluetwostrikout <- plays1 %>% mutate(ident=paste0(gameid,inning,inning_topbot,outs_before)) %>% 
-  filter(!ident %in% firstsec$ident) %>% 
-  group_by(event_type) %>% 
-  summarise(n=n(),tot_runs=sum(runs),mean_runs=mean(runs)) %>% 
-  arrange(desc(mean_runs))
-
-full_join(runvalue%>% select(event_type,mean_runs),
-          runvaluetwostrikout %>% select(event_type,mean_runs) %>% 
-            rename(mean_runs_end_2K=mean_runs),
-          by="event_type") %>% 
-  filter(mean_runs!=0) %>% 
-  gt() %>% 
+#####Sample code for a GT table####
+gt() %>% 
   tab_header(
     title="2021 Run Values",
     subtitle="Run Values vs Run Values if Inning Ended at Two Stirkouts") %>% 
@@ -208,3 +388,9 @@ full_join(runvalue%>% select(event_type,mean_runs),
   tab_source_note(
     source_note = "Data from www.baseballsavant.mlb.com"
   )
+
+
+plays %>% filter(game_type=="Regular Season",inning<9,event_type!="NA",
+                 home_team!="COL") %>% 
+  group_by(gameid,inning,inning_topbot) %>% 
+  summarise(n=n())
